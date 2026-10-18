@@ -1,0 +1,7 @@
+{
+  "leaderboard": {
+    "stats": [
+      { "key": "stars", "label": "Stars caught", "order": "highest" }
+    ]
+  }
+}

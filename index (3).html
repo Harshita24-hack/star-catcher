@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Star Catcher</title>
+<style>
+  :root { --ink:#1b1f3b; --accent:#ffb703; --panel:rgba(255,255,255,.92); }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#bfe3ff; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color:var(--ink); touch-action:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  .card { position:fixed; top:12px; left:12px; display:flex; align-items:center; gap:10px; padding:8px 12px 8px 8px; background:var(--panel); border-radius:999px; box-shadow:0 2px 10px rgba(0,0,0,.15); z-index:3; }
+  .avatar { width:36px; height:36px; border-radius:50%; background:#4b7bec; color:#fff; display:grid; place-items:center; font-weight:700; }
+  .who { display:flex; flex-direction:column; line-height:1.15; }
+  .who b { font-size:14px; }
+  .who span { font-size:11px; opacity:.65; }
+  .card button { margin-left:4px; border:0; border-radius:999px; padding:7px 12px; font-weight:700; background:var(--ink); color:#fff; cursor:pointer; }
+
+  .hud { position:fixed; top:12px; right:12px; display:flex; gap:8px; z-index:3; }
+  .pill { background:var(--panel); border-radius:999px; padding:8px 14px; font-weight:700; box-shadow:0 2px 10px rgba(0,0,0,.15); font-variant-numeric:tabular-nums; }
+
+  .overlay { position:fixed; inset:0; display:grid; place-items:center; background:rgba(27,31,59,.35); z-index:4; padding:16px; }
+  .overlay.hidden { display:none; }
+  .panel { width:min(440px,100%); max-height:92vh; overflow:auto; background:var(--panel); border-radius:20px; padding:22px; box-shadow:0 10px 40px rgba(0,0,0,.25); text-align:center; }
+  .panel h1 { margin:0 0 4px; font-size:30px; }
+  .panel p { margin:6px 0; line-height:1.4; }
+  .muted { opacity:.7; font-size:14px; }
+  .primary { margin-top:12px; border:0; border-radius:14px; padding:13px 26px; font-size:17px; font-weight:800; background:var(--accent); color:var(--ink); cursor:pointer; }
+  .primary:active { transform:scale(.97); }
+  ol.board { list-style:none; padding:0; margin:14px 0 0; text-align:left; font-size:14px; }
+  ol.board li { display:flex; justify-content:space-between; gap:10px; padding:6px 10px; border-radius:8px; }
+  ol.board li:nth-child(odd) { background:rgba(0,0,0,.05); }
+  ol.board li.me { outline:2px solid var(--accent); }
+  .board-title { margin:16px 0 0; font-size:13px; letter-spacing:.06em; text-transform:uppercase; opacity:.6; }
+
+  .pad { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); display:grid; grid-template-columns:repeat(3,64px); grid-template-rows:repeat(2,64px); gap:6px; z-index:3; user-select:none; -webkit-user-select:none; }
+  .pad button { border:0; border-radius:16px; background:rgba(255,255,255,.75); font-size:24px; font-weight:800; color:var(--ink); box-shadow:0 2px 8px rgba(0,0,0,.18); touch-action:none; }
+  .pad button.on { background:var(--accent); }
+  .pad .up { grid-column:2; grid-row:1; } .pad .left { grid-column:1; grid-row:2; } .pad .down { grid-column:2; grid-row:2; } .pad .right { grid-column:3; grid-row:2; }
+  @media (hover:hover) and (pointer:fine) { .pad { display:none; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div class="card" id="player-card">
+  <div class="avatar" id="player-avatar">G</div>
+  <div class="who"><b id="player-name">Guest</b><span id="player-note">Not signed in</span></div>
+  <button id="signin" type="button">Sign in</button>
+</div>
+
+<div class="hud">
+  <div class="pill">⭐ <span id="score">0</span></div>
+  <div class="pill">⏱ <span id="time">30</span></div>
+</div>
+
+<div class="pad" id="pad" aria-label="Move">
+  <button class="up" data-dir="up" aria-label="Up">▲</button>
+  <button class="left" data-dir="left" aria-label="Left">◀</button>
+  <button class="down" data-dir="down" aria-label="Down">▼</button>
+  <button class="right" data-dir="right" aria-label="Right">▶</button>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="panel">
+    <h1 id="ov-title">Star Catcher</h1>
+    <p id="ov-text">Collect as many stars as you can in 30 seconds. Your character comes from your start.ng account.</p>
+    <p class="muted" id="ov-hint">Move with arrow keys or WASD (on a phone, use the buttons).</p>
+    <p id="ov-save" class="muted"></p>
+    <button class="primary" id="go" type="button">Start</button>
+    <div class="board-title" id="board-title" hidden>Top players</div>
+    <ol class="board" id="board"></ol>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------------------------------------------------------------
+   start.ng connection
+   - Players sign in on start.ng and come back with a game session
+     in the address (#startng_session=...). We keep it in
+     sessionStorage and send it as "Authorization: Bearer ...".
+   - The player's character comes from GET /games/{game}/player and
+     is drawn from its "style" fields, so every game that uses
+     start.ng shows the same character.
+---------------------------------------------------------------- */
+const API = 'https://api.start.ng';
+const GAME = location.hostname.endsWith('.start.ng') ? location.hostname.split('.')[0] : 'harshita-star-catcher';
+const ROUND_SECONDS = Math.min(30, Number(new URLSearchParams(location.search).get('t')) || 30);
+
+// pick up the session after sign-in, then clean the address bar
+const hashParams = new URLSearchParams(location.hash.slice(1));
+if (hashParams.get('startng_session')) {
+  try { sessionStorage.setItem('startng_session', hashParams.get('startng_session')); } catch {}
+  history.replaceState(null, '', location.pathname + location.search);
+}
+let session = null;
+try { session = sessionStorage.getItem('startng_session'); } catch {}
+const clearSession = () => { session = null; try { sessionStorage.removeItem('startng_session'); } catch {} };
+
+/* Talks to start.ng through its hidden connect page (only answers games served from *.start.ng).
+   If start.ng can't be reached we give up after a few seconds and play as a guest. */
+const START_NG = 'https://start.ng';
+let frame;
+function connectFrame() {
+  frame ??= new Promise(resolve => {
+    const el = document.createElement('iframe');
+    el.src = `${START_NG}/connect`;
+    el.hidden = true;
+    el.onload = () => resolve(el);
+    el.onerror = () => resolve(null);
+    setTimeout(() => resolve(null), 4000);
+    document.body.append(el);
+  });
+  return frame;
+}
+async function askStartNg(message, replyType, timeoutMs = 4000) {
+  const el = await connectFrame();
+  if (!el) return null;
+  return new Promise(resolve => {
+    const requestId = Math.random().toString(36).slice(2);
+    const done = reply => { clearTimeout(timer); removeEventListener('message', onMessage); resolve(reply); };
+    const timer = setTimeout(() => done(null), timeoutMs);
+    function onMessage(e) {
+      if (e.origin !== START_NG || e.source !== el.contentWindow) return; // only trust start.ng
+      if (e.data?.type === replyType && e.data.requestId === requestId) done(e.data);
+    }
+    addEventListener('message', onMessage);
+    el.contentWindow.postMessage({ ...message, requestId }, START_NG);
+  });
+}
+
+/* ---------------- character style (central styling) ---------------- */
+const GUEST_STYLE = { body:'male', primaryColor:'#4b7bec', secondaryColor:'#2d3436', skinColor:'#f1c27d', hairColor:'#3b2f2f', hair:'short', hat:'none', accessory:'none' };
+const HAIRS = ['short','afro','braids','bun','ponytail','dreads','bald'];
+const HATS = ['none','cap','beanie','tophat','crown'];
+const ACCESSORIES = ['none','glasses','earrings','beard','scarf','backpack'];
+const hex = (v, fb) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) ? v : fb;
+const pick = (v, list, fb) => list.includes(v) ? v : fb;
+function cleanStyle(s) {
+  s = s || {};
+  return {
+    body: pick(s.body, ['female','male'], GUEST_STYLE.body),
+    primaryColor: hex(s.primaryColor, GUEST_STYLE.primaryColor),
+    secondaryColor: hex(s.secondaryColor, GUEST_STYLE.secondaryColor),
+    skinColor: hex(s.skinColor, GUEST_STYLE.skinColor),
+    hairColor: hex(s.hairColor, GUEST_STYLE.hairColor),
+    hair: pick(s.hair, HAIRS, GUEST_STYLE.hair),
+    hat: pick(s.hat, HATS, 'none'),
+    accessory: pick(s.accessory, ACCESSORIES, 'none'),
+  };
+}
+
+const mat = (c, extra = {}) => new THREE.MeshStandardMaterial({ color: c, roughness: .7, metalness: .05, ...extra });
+const box = (w, h, d, m, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); return o; };
+const ball = (r, m, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 16), m); o.position.set(x, y, z); return o; };
+const dome = (r, m, y) => { const o = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2), m); o.position.y = y; return o; };
+
+function buildCharacter(rawStyle) {
+  const st = cleanStyle(rawStyle);
+  const g = new THREE.Group();
+  const skin = mat(st.skinColor), top = mat(st.primaryColor), bottom = mat(st.secondaryColor), hair = mat(st.hairColor);
+  const dark = mat('#222222'), gold = mat('#ffd54a', { metalness: .6, roughness: .3 });
+
+  // legs / skirt
+  if (st.body === 'female') {
+    g.add(box(.16, .45, .18, skin, -.14, .225, 0), box(.16, .45, .18, skin, .14, .225, 0));
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(.35, .56, .5, 20), bottom); skirt.position.y = .7; g.add(skirt);
+  } else {
+    g.add(box(.3, .72, .32, bottom, -.18, .36, 0), box(.3, .72, .32, bottom, .18, .36, 0));
+  }
+  // torso + arms
+  g.add(box(.78, .78, .42, top, 0, 1.1, 0));
+  g.add(box(.2, .66, .22, top, -.5, 1.12, 0), box(.2, .66, .22, top, .5, 1.12, 0));
+  g.add(ball(.12, skin, -.5, .72, 0), ball(.12, skin, .5, .72, 0));
+  // head + face
+  g.add(ball(.32, skin, 0, 1.8, 0));
+  g.add(box(.07, .09, .04, dark, -.11, 1.83, .29), box(.07, .09, .04, dark, .11, 1.83, .29));
+  g.add(box(.14, .03, .03, mat('#b5524a'), 0, 1.68, .3));
+
+  // hair
+  if (st.hair !== 'bald') {
+    if (st.hair === 'afro') { g.add(ball(.5, hair, 0, 1.92, -.04)); }
+    else {
+      g.add(dome(.345, hair, 1.8));
+      if (st.hair === 'braids') g.add(box(.09, .5, .09, hair, -.32, 1.55, -.02), box(.09, .5, .09, hair, .32, 1.55, -.02));
+      if (st.hair === 'bun') g.add(ball(.16, hair, 0, 2.17, -.04));
+      if (st.hair === 'ponytail') g.add(box(.12, .5, .12, hair, 0, 1.62, -.36));
+      if (st.hair === 'dreads') for (let i = 0; i < 6; i++) { const a = (i / 6) * Math.PI * 2; g.add(box(.07, .45, .07, hair, Math.cos(a) * .33, 1.6, Math.sin(a) * .33 - .02)); }
+    }
+  }
+  // hat
+  if (st.hat === 'cap') { g.add(dome(.37, top, 1.84)); g.add(box(.5, .04, .3, top, 0, 1.86, .36)); }
+  if (st.hat === 'beanie') { g.add(dome(.38, bottom, 1.84)); g.add(ball(.09, top, 0, 2.23, 0)); }
+  if (st.hat === 'tophat') {
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(.46, .46, .04, 24), dark); brim.position.y = 2.06; g.add(brim);
+    const tube = new THREE.Mesh(new THREE.CylinderGeometry(.27, .27, .5, 24), dark); tube.position.y = 2.31; g.add(tube);
+  }
+  if (st.hat === 'crown') {
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(.3, .3, .22, 20), gold); ring.position.y = 2.15; g.add(ring);
+    for (let i = 0; i < 5; i++) { const a = (i / 5) * Math.PI * 2; const spike = new THREE.Mesh(new THREE.ConeGeometry(.07, .2, 8), gold); spike.position.set(Math.cos(a) * .27, 2.36, Math.sin(a) * .27); g.add(spike); }
+  }
+  // accessory
+  if (st.accessory === 'glasses') {
+    const frame = mat('#111111');
+    g.add(box(.17, .13, .03, frame, -.11, 1.83, .32), box(.17, .13, .03, frame, .11, 1.83, .32), box(.05, .03, .03, frame, 0, 1.84, .32));
+  }
+  if (st.accessory === 'earrings') g.add(ball(.05, gold, -.34, 1.7, 0), ball(.05, gold, .34, 1.7, 0));
+  if (st.accessory === 'beard') g.add(box(.4, .2, .16, hair, 0, 1.58, .2));
+  if (st.accessory === 'scarf') { const sc = new THREE.Mesh(new THREE.TorusGeometry(.3, .09, 10, 24), bottom); sc.rotation.x = Math.PI / 2; sc.position.y = 1.52; g.add(sc); }
+  if (st.accessory === 'backpack') g.add(box(.55, .6, .25, bottom, 0, 1.1, -.34));
+
+  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  return g;
+}
+
+/* ---------------- scene ---------------- */
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#bfe3ff');
+scene.fog = new THREE.Fog('#bfe3ff', 22, 48);
+const camera = new THREE.PerspectiveCamera(55, 1, .1, 100);
+
+scene.add(new THREE.HemisphereLight('#ffffff', '#9ec9a8', 1.0));
+const sun = new THREE.DirectionalLight('#ffffff', 1.5);
+sun.position.set(8, 14, 6); sun.castShadow = true;
+sun.shadow.camera.left = -16; sun.shadow.camera.right = 16; sun.shadow.camera.top = 16; sun.shadow.camera.bottom = -16;
+sun.shadow.mapSize.set(1024, 1024);
+scene.add(sun);
+
+const ARENA = 10;
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(ARENA * 2 + 4, ARENA * 2 + 4), mat('#bfe6c6'));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+const grid = new THREE.GridHelper(ARENA * 2, 20, '#7fb98d', '#a4d4ae'); grid.position.y = .01; scene.add(grid);
+for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(.25, .3, 1.6, 12), mat('#ffb703')); post.position.set(x * ARENA, .8, z * ARENA); post.castShadow = true; scene.add(post);
+}
+
+let hero = null;
+function setHero(style) {
+  const keep = hero ? hero.position.clone() : new THREE.Vector3();
+  if (hero) scene.remove(hero);
+  hero = buildCharacter(style);
+  hero.position.copy(keep);
+  scene.add(hero);
+}
+setHero(GUEST_STYLE);
+
+const starGeo = new THREE.OctahedronGeometry(.42);
+const starMat = new THREE.MeshStandardMaterial({ color: '#ffd23f', emissive: '#ff9f1c', emissiveIntensity: .6, roughness: .3 });
+const stars = [];
+function spawnStar() {
+  const s = new THREE.Mesh(starGeo, starMat);
+  s.position.set((Math.random() * 2 - 1) * (ARENA - 1), 1, (Math.random() * 2 - 1) * (ARENA - 1));
+  s.castShadow = true; scene.add(s); stars.push(s);
+}
+function resetStars() { stars.splice(0).forEach(s => scene.remove(s)); for (let i = 0; i < 4; i++) spawnStar(); }
+
+/* ---------------- controls ---------------- */
+const keys = new Set();
+const keyMap = { arrowup:'up', w:'up', arrowdown:'down', s:'down', arrowleft:'left', a:'left', arrowright:'right', d:'right' };
+addEventListener('keydown', e => { const k = keyMap[e.key.toLowerCase()]; if (k) { keys.add(k); e.preventDefault(); } });
+addEventListener('keyup', e => { const k = keyMap[e.key.toLowerCase()]; if (k) keys.delete(k); });
+addEventListener('blur', () => keys.clear());
+document.querySelectorAll('#pad button').forEach(b => {
+  const d = b.dataset.dir;
+  const on = e => { e.preventDefault(); keys.add(d); b.classList.add('on'); };
+  const off = e => { e.preventDefault(); keys.delete(d); b.classList.remove('on'); };
+  b.addEventListener('pointerdown', on);
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => b.addEventListener(ev, off));
+});
+
+/* ---------------- UI ---------------- */
+const $ = id => document.getElementById(id);
+const ui = { score: $('score'), time: $('time'), overlay: $('overlay'), title: $('ov-title'), text: $('ov-text'), hint: $('ov-hint'), save: $('ov-save'), go: $('go'), board: $('board'), boardTitle: $('board-title'),
+  name: $('player-name'), note: $('player-note'), avatar: $('player-avatar'), signin: $('signin') };
+
+ui.signin.addEventListener('click', () => { location.href = 'https://start.ng/?return_to=' + encodeURIComponent(location.origin + location.pathname); });
+
+let me = null;        // the signed-in player { id, name, account, style, face }, or null for a guest
+let via = null;       // 'connect' (start.ng connect page) or 'session' (HTTP API game session)
+let guestLook = null; // start.ng's guest look, when the connect page gave us one
+const faceOk = f => typeof f === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(f);
+
+function showPlayer() {
+  const who = me || guestLook;
+  const face = who && who.face;
+  ui.avatar.style.background = faceOk(face) ? `url("${face}") center/cover` : hex(who && who.style && who.style.primaryColor, '#4b7bec');
+  ui.avatar.textContent = faceOk(face) ? '' : ((me && me.name) || 'G').trim().charAt(0).toUpperCase();
+  if (me) {
+    ui.name.textContent = me.name || 'Player';
+    ui.note.textContent = me.account ? `@${me.account}` : 'Signed in with start.ng';
+    ui.signin.hidden = true;
+  } else {
+    ui.name.textContent = 'Guest';
+    ui.note.textContent = 'Sign in to save your score';
+    ui.signin.hidden = false;
+  }
+}
+
+// Who is playing? First ask start.ng's connect page; if that says "guest" but we have a game session, ask the HTTP API.
+async function loadPlayer() {
+  me = null; via = null; guestLook = null;
+  const reply = await askStartNg({ type: 'startng:whoami' }, 'startng:user');
+  if (reply && reply.user) { me = reply.user; via = 'connect'; return; }
+  if (reply && reply.guest) guestLook = reply.guest;
+  if (!session) return;
+  try {
+    const r = await fetch(`${API}/games/${GAME}/player`, { headers: { Authorization: `Bearer ${session}` } });
+    if (r.status === 401) { clearSession(); return; }
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p && typeof p === 'object') { me = p; via = 'session'; }
+  } catch { /* offline or blocked: play as guest */ }
+}
+
+// Central styling: the character always looks like the player's start.ng character (or start.ng's guest look).
+let heroKey = '';
+function applyPlayer() {
+  const style = (me && me.style) || (guestLook && guestLook.style) || GUEST_STYLE;
+  const key = JSON.stringify(cleanStyle(style));
+  if (key !== heroKey) { heroKey = key; setHero(style); }
+  showPlayer();
+}
+
+async function loadBoard() {
+  try {
+    const r = await fetch(`${API}/games/${GAME}/leaderboard?limit=10`);
+    if (!r.ok) throw 0;
+    const rows = await r.json();
+    ui.board.replaceChildren();
+    if (!Array.isArray(rows) || !rows.length) { ui.boardTitle.hidden = true; return; }
+    ui.boardTitle.hidden = false;
+    for (const e of rows) {
+      const li = document.createElement('li');
+      if (me && e.player_id === me.id) li.className = 'me';
+      const left = document.createElement('span'); left.textContent = `${e.rank}. ${e.name}`;
+      const right = document.createElement('b');
+      const n = e.stats && e.stats.stars !== undefined ? e.stats.stars : e.score;
+      right.textContent = `${n} ⭐`;
+      li.append(left, right); ui.board.append(li);
+    }
+  } catch { ui.boardTitle.hidden = true; ui.board.replaceChildren(); }
+}
+
+const savedMessage = d => d.improved ? `New personal best! You are #${d.rank} on the board.` : `Saved. Your best is ${d.best} stars.`;
+
+async function saveRun(n) {
+  if (via === 'connect') {
+    const r = await askStartNg({ type: 'startng:score', stats: { stars: n } }, 'startng:scoreSaved');
+    if (!r) return 'Could not reach start.ng to save your score.';
+    if (!r.ok) return r.error || 'Could not save your score this time.';
+    return savedMessage(r.result);
+  }
+  if (!session) return 'Playing as a guest. Sign in with start.ng to save your score.';
+  try {
+    const r = await fetch(`${API}/games/${GAME}/scores`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session}` },
+      body: JSON.stringify({ stats: { stars: n } }),
+    });
+    if (r.status === 401) { clearSession(); me = null; via = null; showPlayer(); return 'Your sign-in expired. Sign in again to save scores.'; }
+    if (!r.ok) return 'Could not save your score this time.';
+    return savedMessage(await r.json());
+  } catch { return 'Could not reach start.ng to save your score.'; }
+}
+
+/* ---------------- game loop ---------------- */
+let state = 'ready', score = 0, timeLeft = ROUND_SECONDS;
+const SPEED = 6.5;
+const camTarget = new THREE.Vector3();
+
+function startRound() {
+  score = 0; timeLeft = ROUND_SECONDS; ui.score.textContent = '0'; ui.time.textContent = String(Math.ceil(timeLeft));
+  hero.position.set(0, 0, 0); resetStars();
+  ui.overlay.classList.add('hidden'); state = 'playing';
+}
+async function endRound() {
+  state = 'over';
+  ui.title.textContent = `You caught ${score} star${score === 1 ? '' : 's'}!`;
+  ui.text.textContent = 'Nice run. Want to beat it?';
+  ui.hint.textContent = '';
+  ui.save.textContent = 'Saving your score…';
+  ui.go.textContent = 'Play again';
+  ui.overlay.classList.remove('hidden');
+  const msg = await saveRun(score);
+  ui.save.textContent = msg;
+  loadBoard();
+}
+ui.go.addEventListener('click', startRound);
+
+const clock = new THREE.Clock();
+function tick() {
+  const dt = Math.min(clock.getDelta(), .05), t = clock.elapsedTime;
+  if (state === 'playing') {
+    const dx = (keys.has('right') ? 1 : 0) - (keys.has('left') ? 1 : 0);
+    const dz = (keys.has('down') ? 1 : 0) - (keys.has('up') ? 1 : 0);
+    if (dx || dz) {
+      const len = Math.hypot(dx, dz);
+      hero.position.x = THREE.MathUtils.clamp(hero.position.x + (dx / len) * SPEED * dt, -ARENA, ARENA);
+      hero.position.z = THREE.MathUtils.clamp(hero.position.z + (dz / len) * SPEED * dt, -ARENA, ARENA);
+      const want = Math.atan2(dx, dz);
+      let diff = want - hero.rotation.y; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      hero.rotation.y += diff * Math.min(1, dt * 12);
+      hero.position.y = Math.abs(Math.sin(t * 14)) * .08;
+    } else hero.position.y = 0;
+    for (let i = stars.length - 1; i >= 0; i--) {
+      if (stars[i].position.distanceTo(new THREE.Vector3(hero.position.x, 1, hero.position.z)) < 1.0) {
+        scene.remove(stars[i]); stars.splice(i, 1); spawnStar(); score++; ui.score.textContent = String(score);
+      }
+    }
+    timeLeft -= dt; ui.time.textContent = String(Math.max(0, Math.ceil(timeLeft)));
+    if (timeLeft <= 0) endRound();
+  } else {
+    hero.rotation.y += dt * .8; // idle spin on the start and end screens
+  }
+  stars.forEach((s, i) => { s.rotation.y += dt * 2; s.position.y = 1 + Math.sin(t * 3 + i) * .15; });
+  camTarget.set(hero.position.x * .85, 0, hero.position.z * .85);
+  camera.position.lerp(new THREE.Vector3(camTarget.x, 9, camTarget.z + 11), Math.min(1, dt * 5));
+  camera.lookAt(camTarget.x, 1, camTarget.z);
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+/* ---------------- boot ---------------- */
+showPlayer();
+resetStars();
+requestAnimationFrame(tick);
+(async () => {
+  await loadPlayer();
+  applyPlayer(); // central styling decides how the character looks
+  loadBoard();
+})();
+
+// They may sign in or out on start.ng in another tab: ask again when they come back.
+async function refreshPlayer() {
+  if (state === 'playing') return;
+  const before = me && me.id;
+  await loadPlayer();
+  applyPlayer();
+  if ((me && me.id) !== before) loadBoard();
+}
+addEventListener('focus', refreshPlayer);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPlayer(); });
+</script>
+</body>
+</html>
