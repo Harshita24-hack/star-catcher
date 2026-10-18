@@ -4,6 +4,7 @@ A small 3D browser game built with **Three.js** and published on **start.ng**.
 Catch as many stars as you can in 30 seconds, as your own start.ng character.
 
 🎮 **Play it:** https://star-catcher.start.ng
+
 🎥 **Demo video:** https://drive.google.com/file/d/1wuW8YiuWMo4cyGsPdymWj5Lz0Uyt_4bp/view?usp=sharing
 
 ## How to play
